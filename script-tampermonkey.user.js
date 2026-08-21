@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.6
+// @version      4.7
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney
 // @match        https://update.amspec.group/*
 // @grant        none
@@ -217,15 +217,30 @@
                 beforeRange.setEnd(range.startContainer, range.startOffset);
                 const beforeText = beforeRange.toString();
 
-                const afterRange = document.createRange();
-                afterRange.setStart(range.endContainer, range.endOffset);
-                afterRange.setEnd(endLine, endLine.childNodes.length);
-                const afterText = afterRange.toString();
+                // El triple-click de Chrome a veces extiende la selección hasta el
+                // inicio literal del <div> siguiente SIN seleccionar ningún carácter
+                // suyo (endOffset apunta a la posición 0 de esa línea). Si tratáramos
+                // eso como "línea final realmente seleccionada", su texto se pegaría
+                // sin separador al reemplazar — justo el bug que se intenta evitar.
+                // Detectarlo y, en ese caso, dejar endLine intacta.
+                const endProbe = document.createRange();
+                endProbe.setStart(endLine, 0);
+                endProbe.setEnd(range.endContainer, range.endOffset);
+                const endLineUntouched = endProbe.toString() === "";
 
-                // Quitar los <div> de línea desde el siguiente a startLine hasta endLine (incluido).
+                const afterText = endLineUntouched ? "" : (function() {
+                    const afterRange = document.createRange();
+                    afterRange.setStart(range.endContainer, range.endOffset);
+                    afterRange.setEnd(endLine, endLine.childNodes.length);
+                    return afterRange.toString();
+                })();
+
+                // Quitar los <div> de línea desde el siguiente a startLine hasta endLine
+                // (incluido, salvo que endLine no tuviera nada realmente seleccionado).
                 let node = startLine.nextSibling;
                 while (node) {
                     const next = node.nextSibling;
+                    if (endLineUntouched && node === endLine) break;
                     div.removeChild(node);
                     if (node === endLine) break;
                     node = next;
