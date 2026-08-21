@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.5
+// @version      4.6
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney
 // @match        https://update.amspec.group/*
 // @grant        none
@@ -94,6 +94,21 @@
             // sobre el fondo blanco. Fijarlo independiente del color de texto.
             div.style.caretColor = "#333";
 
+            // Devuelve el <div> de línea (hijo directo de `div`) que contiene `node`,
+            // subiendo por los ancestros. Usado por el paste handler y por el guard
+            // de selección multilínea para saber en qué línea cae el cursor.
+            function lineDivOf(node) {
+                let n = node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode;
+                while (n && n.parentNode !== div) n = n.parentNode;
+                return n;
+            }
+
+            // Da contenido "editable" a una línea vacía (nodo de texto vacío colapsa
+            // a altura cero en algunos casos) — mismo criterio que structureLines().
+            function fillLine(lineEl, text) {
+                lineEl.appendChild(text ? document.createTextNode(text) : document.createElement("br"));
+            }
+
             div.addEventListener("paste", function(e) {
                 e.preventDefault();
                 e.stopImmediatePropagation();
@@ -105,28 +120,146 @@
                 const range = sel.getRangeAt(0);
                 range.deleteContents();
 
-                const fragment = document.createDocumentFragment();
                 const lines = text.split(/\r?\n/);
 
-                lines.forEach((line, i) => {
-                    fragment.appendChild(document.createTextNode(line));
-                    if (i < lines.length - 1) {
-                        fragment.appendChild(document.createElement("br"));
-                    }
-                });
-
-                // Guardar el último nodo ANTES de insertar: insertNode vacía el fragment,
-                // así que fragment.lastChild sería null después. Necesario para colocar
-                // el caret al final del texto pegado (no al inicio).
-                const lastNode = fragment.lastChild;
-                range.insertNode(fragment);
-                if (lastNode) {
-                    range.setStartAfter(lastNode);
+                if (lines.length === 1) {
+                    // Una sola línea: no cruza límites de <div>, insertar inline basta.
+                    const textNode = document.createTextNode(lines[0]);
+                    range.insertNode(textNode);
+                    range.setStartAfter(textNode);
                     range.collapse(true);
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                    return;
                 }
+
+                // Pegado multilínea: partir el <div> de línea actual en un <div> por
+                // línea pegada. Insertar <br> sueltos aquí (como antes) dejaría todo el
+                // contenido dentro de UN solo <div>, la estructura plana que
+                // structureLines() existe justamente para evitar (ver su comentario más
+                // abajo) — y que reintroduce el riesgo de colapso catastrófico de Chrome
+                // al editar sobre ese <div>.
+                let lineDiv = lineDivOf(range.startContainer);
+                if (!lineDiv) {
+                    // Fallback defensivo (no debería ocurrir tras applyEditFix): insertar
+                    // como texto+<br> plano igual que antes.
+                    const fragment = document.createDocumentFragment();
+                    lines.forEach((line, i) => {
+                        fragment.appendChild(document.createTextNode(line));
+                        if (i < lines.length - 1) fragment.appendChild(document.createElement("br"));
+                    });
+                    const lastNode = fragment.lastChild;
+                    range.insertNode(fragment);
+                    if (lastNode) {
+                        range.setStartAfter(lastNode);
+                        range.collapse(true);
+                    }
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                    return;
+                }
+
+                // Separar el contenido de lineDiv en "antes del cursor" (se queda en
+                // lineDiv) y "después del cursor" (pasa a la última línea nueva).
+                const afterRange = document.createRange();
+                afterRange.setStart(range.startContainer, range.startOffset);
+                afterRange.setEndAfter(lineDiv.lastChild);
+                const afterFragment = afterRange.extractContents();
+
+                // Si lineDiv quedó vacío (línea en blanco, placeholder <br>), limpiarlo
+                // antes de escribir la primera línea pegada.
+                if (lineDiv.childNodes.length === 1 && lineDiv.firstChild.nodeName === "BR") {
+                    lineDiv.innerHTML = "";
+                }
+                lineDiv.appendChild(document.createTextNode(lines[0]));
+
+                let insertAfter = lineDiv;
+                for (let i = 1; i < lines.length - 1; i++) {
+                    const newLineDiv = document.createElement("div");
+                    fillLine(newLineDiv, lines[i]);
+                    insertAfter.parentNode.insertBefore(newLineDiv, insertAfter.nextSibling);
+                    insertAfter = newLineDiv;
+                }
+
+                const lastLineDiv = document.createElement("div");
+                const lastTextNode = document.createTextNode(lines[lines.length - 1]);
+                lastLineDiv.appendChild(lastTextNode);
+                if (afterFragment.childNodes.length) lastLineDiv.appendChild(afterFragment);
+                insertAfter.parentNode.insertBefore(lastLineDiv, insertAfter.nextSibling);
+
+                const caretRange = document.createRange();
+                caretRange.setStart(lastTextNode, lastTextNode.length);
+                caretRange.collapse(true);
                 sel.removeAllRanges();
-                sel.addRange(range);
+                sel.addRange(caretRange);
             }, true);
+
+            div.addEventListener("beforeinput", function(e) {
+                const sel = window.getSelection();
+                if (!sel.rangeCount) return;
+                const range = sel.getRangeAt(0);
+                if (range.collapsed) return; // sin selección: el manejo nativo (incl. Backspace en límite de línea) ya funciona bien
+
+                const startLine = lineDivOf(range.startContainer);
+                const endLine = lineDivOf(range.endContainer);
+                if (!startLine || !endLine || startLine === endLine) return; // selección dentro de una sola línea: comportamiento nativo OK
+
+                // La selección cruza más de un <div> de línea (p.ej. triple-click que se
+                // extiende al <div> siguiente en vez de pararse en el límite del bloque).
+                // El manejo nativo de contentEditable en ese caso fusiona los <div> de
+                // forma inconsistente — a veces sin dejar separador alguno entre las dos
+                // líneas — perdiendo el límite. Reemplazamos el contenido a mano para
+                // garantizar que el resultado quede en <div> por línea correctos.
+                e.preventDefault();
+
+                const beforeRange = document.createRange();
+                beforeRange.setStart(startLine, 0);
+                beforeRange.setEnd(range.startContainer, range.startOffset);
+                const beforeText = beforeRange.toString();
+
+                const afterRange = document.createRange();
+                afterRange.setStart(range.endContainer, range.endOffset);
+                afterRange.setEnd(endLine, endLine.childNodes.length);
+                const afterText = afterRange.toString();
+
+                // Quitar los <div> de línea desde el siguiente a startLine hasta endLine (incluido).
+                let node = startLine.nextSibling;
+                while (node) {
+                    const next = node.nextSibling;
+                    div.removeChild(node);
+                    if (node === endLine) break;
+                    node = next;
+                }
+
+                const isNewline = e.inputType === "insertParagraph" || e.inputType === "insertLineBreak";
+                const typed = isNewline ? "" : (e.data != null ? e.data : "");
+
+                startLine.innerHTML = "";
+                fillLine(startLine, beforeText + typed);
+
+                let caretRange = document.createRange();
+
+                if (isNewline) {
+                    const newLine = document.createElement("div");
+                    fillLine(newLine, afterText);
+                    startLine.parentNode.insertBefore(newLine, startLine.nextSibling);
+                    caretRange.setStart(newLine.firstChild, 0);
+                } else if (startLine.firstChild.nodeName === "BR") {
+                    // startLine quedó vacío (beforeText+typed === ""): el caret va antes del texto restante.
+                    const afterNode = document.createTextNode(afterText);
+                    startLine.innerHTML = "";
+                    startLine.appendChild(afterNode);
+                    caretRange.setStart(afterNode, 0);
+                } else {
+                    const startText = beforeText + typed;
+                    startLine.appendChild(document.createTextNode(afterText));
+                    caretRange.setStart(startLine.firstChild, startText.length);
+                }
+
+                caretRange.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(caretRange);
+            });
         });
     }
 
