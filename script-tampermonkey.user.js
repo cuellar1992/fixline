@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.7
+// @version      4.8
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney
 // @match        https://update.amspec.group/*
 // @grant        none
@@ -121,6 +121,32 @@
                 range.deleteContents();
 
                 const lines = text.split(/\r?\n/);
+
+                if (div.childNodes.length === 0) {
+                    // El campo quedó completamente vacío (p.ej. Ctrl+A + pegar reemplaza
+                    // todo el contenido de una vez: deleteContents() sobre esa selección
+                    // deja `div` sin hijos). No hay ningún <div> de línea existente para
+                    // partir — crear uno nuevo por línea directamente bajo `div`.
+                    const fragment = document.createDocumentFragment();
+                    lines.forEach(line => {
+                        const lineDiv = document.createElement("div");
+                        fillLine(lineDiv, line);
+                        fragment.appendChild(lineDiv);
+                    });
+                    div.appendChild(fragment);
+
+                    const lastLineDiv = div.lastChild;
+                    const caretRange = document.createRange();
+                    if (lastLineDiv.firstChild.nodeName === "BR") {
+                        caretRange.setStartBefore(lastLineDiv.firstChild);
+                    } else {
+                        caretRange.setStart(lastLineDiv.firstChild, lastLineDiv.firstChild.length);
+                    }
+                    caretRange.collapse(true);
+                    sel.removeAllRanges();
+                    sel.addRange(caretRange);
+                    return;
+                }
 
                 if (lines.length === 1) {
                     // Una sola línea: no cruza límites de <div>, insertar inline basta.
