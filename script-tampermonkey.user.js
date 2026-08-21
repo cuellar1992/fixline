@@ -5,8 +5,8 @@
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney
 // @match        https://update.amspec.group/*
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/cuellar1992/amspec-tampermonkey/main/amspec-tampermonkey.user.js
-// @downloadURL  https://raw.githubusercontent.com/cuellar1992/amspec-tampermonkey/main/amspec-tampermonkey.user.js
+// @updateURL    https://raw.githubusercontent.com/cuellar1992/script-tampermonkey/main/script-tampermonkey.user.js
+// @downloadURL  https://raw.githubusercontent.com/cuellar1992/script-tampermonkey/main/script-tampermonkey.user.js
 // ==/UserScript==
 
 (function() {
