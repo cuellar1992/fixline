@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.10
+// @version      4.11
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney
 // @match        https://update.amspec.group/*
 // @grant        none
@@ -109,6 +109,14 @@
                 lineEl.appendChild(text ? document.createTextNode(text) : document.createElement("br"));
             }
 
+            // true si `node` está dentro de una tabla o lista anidada en el editor.
+            // Ahí un <div> raíz NO es una línea: puede contener el mensaje entero.
+            function inNestedBlock(node) {
+                const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode;
+                const block = el && el.closest("table, ul, ol");
+                return !!block && div.contains(block);
+            }
+
             div.addEventListener("paste", function(e) {
                 e.preventDefault();
                 e.stopImmediatePropagation();
@@ -166,9 +174,11 @@
                 // abajo) — y que reintroduce el riesgo de colapso catastrófico de Chrome
                 // al editar sobre ese <div>.
                 let lineDiv = lineDivOf(range.startContainer);
-                if (!lineDiv) {
-                    // Fallback defensivo (no debería ocurrir tras applyEditFix): insertar
-                    // como texto+<br> plano igual que antes.
+                if (!lineDiv || inNestedBlock(range.startContainer)) {
+                    // Sin <div> de línea, o cursor dentro de una tabla/lista (contenido
+                    // pegado como HTML que llega envuelto en <table><td>): partir el
+                    // <div> raíz clonaría la tabla. Insertar texto+<br> en el sitio, que
+                    // además hereda el estilo del <span> donde está el cursor.
                     const fragment = document.createDocumentFragment();
                     lines.forEach((line, i) => {
                         fragment.appendChild(document.createTextNode(line));
@@ -226,6 +236,10 @@
                 const range = sel.getRangeAt(0);
                 if (range.collapsed) return; // sin selección: el manejo nativo (incl. Backspace en límite de línea) ya funciona bien
 
+                // Solo escritura/borrado. Formato (Ctrl+B, etc.) y deshacer van nativos:
+                // antes se interceptaban también y borraban el texto seleccionado.
+                if (!/^(insert|delete)/.test(e.inputType)) return;
+
                 const startLine = lineDivOf(range.startContainer);
                 const endLine = lineDivOf(range.endContainer);
                 if (!startLine || !endLine || startLine === endLine) return; // selección dentro de una sola línea: comportamiento nativo OK
@@ -234,14 +248,11 @@
                 // extiende al <div> siguiente en vez de pararse en el límite del bloque).
                 // El manejo nativo de contentEditable en ese caso fusiona los <div> de
                 // forma inconsistente — a veces sin dejar separador alguno entre las dos
-                // líneas — perdiendo el límite. Reemplazamos el contenido a mano para
-                // garantizar que el resultado quede en <div> por línea correctos.
+                // líneas — perdiendo el límite. Borramos a mano con rangos (conserva
+                // negrita, spans y tablas; reconstruir con texto plano aplanaba el
+                // mensaje entero cuando venía envuelto en <table>) y luego delegamos la
+                // inserción en execCommand, ya con la selección colapsada.
                 e.preventDefault();
-
-                const beforeRange = document.createRange();
-                beforeRange.setStart(startLine, 0);
-                beforeRange.setEnd(range.startContainer, range.startOffset);
-                const beforeText = beforeRange.toString();
 
                 // El triple-click de Chrome a veces extiende la selección hasta el
                 // inicio literal del <div> siguiente SIN seleccionar ningún carácter
@@ -254,52 +265,44 @@
                 endProbe.setEnd(range.endContainer, range.endOffset);
                 const endLineUntouched = endProbe.toString() === "";
 
-                const afterText = endLineUntouched ? "" : (function() {
-                    const afterRange = document.createRange();
-                    afterRange.setStart(range.endContainer, range.endOffset);
-                    afterRange.setEnd(endLine, endLine.childNodes.length);
-                    return afterRange.toString();
-                })();
+                const delRange = range.cloneRange();
+                if (endLineUntouched) {
+                    delRange.setEnd(div, Array.prototype.indexOf.call(div.childNodes, endLine));
+                }
+                delRange.deleteContents();
+                // deleteContents() deja el rango en el ancestro común (la raíz) cuando la
+                // selección sale de una tabla; el nodo de inicio sobrevive truncado, así
+                // que volver a su posición original deja el cursor dentro de la línea.
+                delRange.setStart(range.startContainer, range.startOffset);
+                delRange.collapse(true);
 
-                // Quitar los <div> de línea desde el siguiente a startLine hasta endLine
-                // (incluido, salvo que endLine no tuviera nada realmente seleccionado).
-                let node = startLine.nextSibling;
-                while (node) {
-                    const next = node.nextSibling;
-                    if (endLineUntouched && node === endLine) break;
-                    div.removeChild(node);
-                    if (node === endLine) break;
-                    node = next;
+                // Fusionar lo que quedó de endLine en el punto del cursor.
+                if (!endLineUntouched && endLine.parentNode === div) {
+                    const rest = document.createDocumentFragment();
+                    while (endLine.firstChild) rest.appendChild(endLine.firstChild);
+                    div.removeChild(endLine);
+                    const onlyPlaceholder = rest.childNodes.length === 1 && rest.firstChild.nodeName === "BR";
+                    if (rest.childNodes.length && !onlyPlaceholder) {
+                        delRange.insertNode(rest);
+                        delRange.collapse(true);
+                    }
                 }
 
-                const isNewline = e.inputType === "insertParagraph" || e.inputType === "insertLineBreak";
-                const typed = isNewline ? "" : (e.data != null ? e.data : "");
-
-                startLine.innerHTML = "";
-                fillLine(startLine, beforeText + typed);
-
-                let caretRange = document.createRange();
-
-                if (isNewline) {
-                    const newLine = document.createElement("div");
-                    fillLine(newLine, afterText);
-                    startLine.parentNode.insertBefore(newLine, startLine.nextSibling);
-                    caretRange.setStart(newLine.firstChild, 0);
-                } else if (startLine.firstChild.nodeName === "BR") {
-                    // startLine quedó vacío (beforeText+typed === ""): el caret va antes del texto restante.
-                    const afterNode = document.createTextNode(afterText);
+                if (!startLine.textContent && !startLine.querySelector("br, img, table")) {
                     startLine.innerHTML = "";
-                    startLine.appendChild(afterNode);
-                    caretRange.setStart(afterNode, 0);
-                } else {
-                    const startText = beforeText + typed;
-                    startLine.appendChild(document.createTextNode(afterText));
-                    caretRange.setStart(startLine.firstChild, startText.length);
+                    fillLine(startLine, "");
+                    delRange.setStartBefore(startLine.firstChild);
+                    delRange.collapse(true);
                 }
 
-                caretRange.collapse(true);
                 sel.removeAllRanges();
-                sel.addRange(caretRange);
+                sel.addRange(delRange);
+
+                if (e.inputType === "insertParagraph" || e.inputType === "insertLineBreak") {
+                    document.execCommand(e.inputType);
+                } else if (e.inputType.startsWith("insert") && e.data) {
+                    document.execCommand("insertText", false, e.data);
+                }
             });
         });
     }
