@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.11
+// @version      4.12
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney
 // @match        https://update.amspec.group/*
 // @grant        none
@@ -315,27 +315,74 @@
     // Normaliza bloques <div>/<p> → <br> conservando formato inline
     // (<b>, <i>, <u>, <span style>, <a>...). Reemplaza el antiguo innerText,
     // que aplanaba todo y borraba negrita/fuente al enviar.
+    const BLOCK_TAGS = /^(DIV|P|TABLE|UL|OL|H[1-6]|BLOCKQUOTE|PRE)$/;
+
+    // Último hijo que se ve (ignora comentarios y texto solo-espacios).
+    function lastRendered(node) {
+        let n = node.lastChild;
+        while (n && (n.nodeType === Node.COMMENT_NODE ||
+                     (n.nodeType === Node.TEXT_NODE && !n.nodeValue.trim()))) {
+            n = n.previousSibling;
+        }
+        return n;
+    }
+
+    // true si el contenido de `node` termina en un bloque (p.ej. una tabla):
+    // lo que venga después ya empieza en línea nueva sin necesidad de <br>.
+    function endsWithBlock(node) {
+        let n = node;
+        while (n && n.nodeType === Node.ELEMENT_NODE) {
+            if (BLOCK_TAGS.test(n.tagName)) return true;
+            n = lastRendered(n);
+        }
+        return false;
+    }
+
     function normalizeBreaks(container) {
-        // 1) Desenvolver cada bloque en <br> + su contenido inline
-        container.querySelectorAll('div, p').forEach(block => {
-            const parent = block.parentNode;
-            if (!parent) return;
-
-            const kids = Array.from(block.childNodes);
-            const emptyLine = kids.length === 0 ||
-                (kids.length === 1 && kids[0].nodeType === Node.ELEMENT_NODE && kids[0].tagName === 'BR');
-
-            // Separador de línea antes del bloque (salvo si es el primer nodo del editor)
-            if (block.previousSibling || parent !== container) {
-                parent.insertBefore(document.createElement('br'), block);
+        // 1) Desenvolver en <br> + contenido inline SOLO los <div>/<p> de línea de la
+        // raíz (los que crea structureLines o Chrome al pulsar Enter). Los bloques
+        // anidados (<p> dentro de la tabla de un update pegado como HTML) se dejan
+        // tal cual: el servidor los entrega y renderiza bien, y convertirlos
+        // volvía visibles <p> de altura 0 y <br> finales de bloque, añadiendo
+        // saltos de línea en la vista previa que la edición no tenía.
+        //
+        // `open` = hay una línea empezada que necesita un <br> antes de la siguiente.
+        // Tras un bloque (tabla) o un <br> ya estamos a inicio de línea.
+        let open = false;
+        Array.from(container.childNodes).forEach(node => {
+            if (node.nodeType === Node.COMMENT_NODE ||
+                (node.nodeType === Node.TEXT_NODE && !node.nodeValue.trim())) return;
+            if (node.nodeType !== Node.ELEMENT_NODE) { open = true; return; }
+            if (node.tagName === 'BR') { open = false; return; }
+            if (node.tagName !== 'DIV' && node.tagName !== 'P') {
+                open = !endsWithBlock(node);
+                return;
             }
 
+            const block = node;
+
+            // Un <br> al final de un bloque no se ve; desenvuelto sí. Quitarlo.
+            let tail = lastRendered(block);
+            while (tail && tail.nodeType === Node.ELEMENT_NODE &&
+                   tail.tagName !== 'BR' && !BLOCK_TAGS.test(tail.tagName)) {
+                tail = lastRendered(tail);
+            }
+            const onlyBr = block.childNodes.length === 1 && block.firstChild === tail;
+            if (tail && tail.nodeName === 'BR' && !onlyBr) tail.parentNode.removeChild(tail);
+
+            const emptyLine = !block.textContent && !block.querySelector('img, table');
+
+            if (open) container.insertBefore(document.createElement('br'), block);
+
             if (emptyLine) {
-                // El separador ya representa la línea vacía; no duplicar el <br> interno
-                parent.removeChild(block);
+                // La línea vacía queda representada por el <br> que la cierre.
+                container.removeChild(block);
+                open = true;
             } else {
-                while (block.firstChild) parent.insertBefore(block.firstChild, block);
-                parent.removeChild(block);
+                const last = lastRendered(block);
+                open = !(last && endsWithBlock(last));
+                while (block.firstChild) container.insertBefore(block.firstChild, block);
+                container.removeChild(block);
             }
         });
 
