@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.13
-// @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney + Import Table de varias tablas (una sección por título)
+// @version      4.15
+// @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney + Import Table de varias tablas (una sección por título) + modo oscuro
 // @match        https://update.amspec.group/*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/cuellar1992/fixline/main/fixline.user.js
@@ -490,11 +490,37 @@
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // SECCIÓN 4b: PUNTERO "I" VISIBLE EN LOS EDITORES
+    // El cursor de texto nativo de Windows invierte los colores de lo que
+    // tiene debajo: sobre texto/fondos grises casi desaparece y no se ve en
+    // qué línea se está al seleccionar. Se reemplaza, solo en los editores,
+    // por una "I" negra con borde blanco, visible sobre cualquier fondo.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function injectEditorCursor() {
+        if (document.getElementById('amspec-editor-cursor')) return;
+        const ibeam = "M5 2h6M5 22h6M8 2v20";
+        const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'>` +
+            `<path d='${ibeam}' stroke='white' stroke-width='4' stroke-linecap='square' fill='none'/>` +
+            `<path d='${ibeam}' stroke='black' stroke-width='1.6' stroke-linecap='square' fill='none'/></svg>`;
+        const style = document.createElement('style');
+        style.id = 'amspec-editor-cursor';
+        style.textContent = `
+            .textareafalse[contenteditable="true"],
+            .textareafalse[contenteditable="true"] * {
+                cursor: url("data:image/svg+xml,${encodeURIComponent(svg)}") 8 12, text !important;
+            }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // INICIALIZACIÓN
     // Ejecuta todas las funciones al cargar y ante cambios en el DOM
     // ─────────────────────────────────────────────────────────────────────────
 
     const init = () => {
+        injectEditorCursor();
         applyEditFix();
         interceptPrepareTextarea();
         convertTimestamps();
@@ -965,5 +991,121 @@
         e.stopImmediatePropagation();
         importAllTables();
     }, true);
+
+})();
+
+// ─────────────────────────────────────────────────────────────────────────
+// SECTION 7: MODO OSCURO
+// La app no tiene tema oscuro y el fondo blanco cansa la vista de noche.
+// Filtro sobre <html>: invert + hue-rotate(180deg) oscurece los fondos y
+// aclara el texto conservando el tono de los colores (el rojo AmSpec sigue
+// rojo). Imágenes/videos se re-invierten para no verse en negativo, y los
+// elementos con fondo rojo AmSpec (barra, menú, botones) también, para que
+// queden en su rojo oscuro original en vez de un salmón claro que encandila.
+// Es solo visual: no toca el contenido del documento que se guarda o se envía.
+// Botón flotante 🌙/☀️ abajo a la izquierda; la elección queda en
+// localStorage (activo por defecto).
+// ─────────────────────────────────────────────────────────────────────────
+
+(function() {
+    'use strict';
+
+    const STORAGE_KEY = 'amspec_dark_mode';
+    const STYLE_ID = 'amspec-dark-style';
+    const BUTTON_ID = 'amspec-dark-toggle';
+    const REVERT = 'invert(1) hue-rotate(180deg)';
+    const KEEP_CLASS = 'amspec-keep-color';
+
+    const CSS = `
+        html {
+            background-color: #fff !important;
+            filter: invert(0.92) hue-rotate(180deg);
+        }
+        img, video, picture, canvas, iframe,
+        [style*="background-image"],
+        .${KEEP_CLASS},
+        #${BUTTON_ID} {
+            filter: ${REVERT};
+        }
+        /* Dentro de un elemento ya re-invertido, una imagen quedaría en negativo. */
+        .${KEEP_CLASS} img, .${KEEP_CLASS} video, .${KEEP_CLASS} canvas,
+        .${KEEP_CLASS} [style*="background-image"] {
+            filter: none;
+        }
+    `;
+
+    function isBrandRed(el) {
+        const parts = (getComputedStyle(el).backgroundColor.match(/[\d.]+/g) || []).map(Number);
+        const [r, g, b, a = 1] = parts;
+        return parts.length >= 3 && a > 0.5 && r > 110 && r - g > 60 && r - b > 60;
+    }
+
+    // Solo el elemento rojo más externo: re-invertir también a un descendiente
+    // lo volvería a invertir.
+    function markBrandRed() {
+        if (!enabled || !document.body) return;
+        document.querySelectorAll('body *').forEach(el => {
+            if (el.classList.contains(KEEP_CLASS) || el.id === BUTTON_ID) return;
+            if (el.parentElement && el.parentElement.closest('.' + KEEP_CLASS)) return;
+            if (isBrandRed(el)) el.classList.add(KEEP_CLASS);
+        });
+    }
+
+    let markTimer = null;
+    function scheduleMark() {
+        clearTimeout(markTimer);
+        markTimer = setTimeout(markBrandRed, 200);
+    }
+
+    let enabled = (() => {
+        try { return localStorage.getItem(STORAGE_KEY) !== 'off'; } catch { return true; }
+    })();
+
+    function apply() {
+        let style = document.getElementById(STYLE_ID);
+        if (enabled && !style) {
+            style = document.createElement('style');
+            style.id = STYLE_ID;
+            style.textContent = CSS;
+            (document.head || document.documentElement).appendChild(style);
+        } else if (!enabled && style) {
+            style.remove();
+        }
+        if (enabled) markBrandRed();
+        const btn = document.getElementById(BUTTON_ID);
+        if (btn) {
+            btn.textContent = enabled ? '☀️' : '🌙';
+            btn.title = enabled ? 'Light mode' : 'Dark mode';
+        }
+    }
+
+    function addToggle() {
+        if (!document.body || document.getElementById(BUTTON_ID)) return;
+        const btn = document.createElement('button');
+        btn.id = BUTTON_ID;
+        btn.type = 'button';
+        btn.style.cssText = [
+            'position:fixed', 'left:16px', 'bottom:16px', 'z-index:2147483647',
+            'width:40px', 'height:40px', 'border-radius:50%', 'border:1px solid #888',
+            'background:#2b2b2f', 'color:#fff', 'font-size:18px', 'line-height:1',
+            'cursor:pointer', 'box-shadow:0 2px 6px rgba(0,0,0,.4)', 'padding:0',
+        ].join(';');
+        btn.addEventListener('click', () => {
+            enabled = !enabled;
+            try { localStorage.setItem(STORAGE_KEY, enabled ? 'on' : 'off'); } catch { /* sin storage: vale solo para esta página */ }
+            apply();
+        });
+        document.body.appendChild(btn);
+        apply();
+    }
+
+    apply();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', addToggle);
+    } else {
+        addToggle();
+    }
+    // Popups, secciones nuevas, etc.: marcar sus elementos rojos al aparecer.
+    new MutationObserver(scheduleMark).observe(document.documentElement, { childList: true, subtree: true });
 
 })();
