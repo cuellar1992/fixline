@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.12
-// @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney
+// @version      4.13
+// @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney + Import Table de varias tablas (una sección por título)
 // @match        https://update.amspec.group/*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/cuellar1992/fixline/main/fixline.user.js
@@ -804,5 +804,166 @@
     } else {
         setupCopyPaste();
     }
+
+})();
+
+// ─────────────────────────────────────────────────────────────────────────
+// SECTION 6: IMPORT TABLE — VARIAS TABLAS, UNA SECCIÓN POR TÍTULO
+// El "Import Table" nativo (modal de "Add Table") solo toma la PRIMERA
+// <table> del portapapeles (tempDiv.querySelector('table')). Este handler
+// corre antes que el nativo (click en fase capture sobre window) e importa
+// TODAS las tablas del HTML copiado, agrupadas por la línea de título que
+// las precede (p.ej. "Copy All" de Cargo Report Automation: "Figures
+// Gasoline 91 Ron" + 3 tablas, "Figures Gasoline 95 Ron" + 3 tablas...):
+//   - el primer grupo va a la sección donde se hizo clic en "Add Table"
+//     (si su encabezado está vacío, recibe el título; si tiene otro texto,
+//     el grupo va a una sección nueva para no mezclar);
+//   - cada grupo siguiente va a una sección nueva, creada con el propio
+//     botón "+" (.sumsection) de la página, con el título en su encabezado.
+// Las tablas se crean con las funciones globales de la página
+// extractTableData()/createTableFromClipboard(), apuntando antes las
+// globales lastSection/lastDynamicContent a la sección destino (lo mismo
+// que hace el botón "Add Table"). Sin títulos (copia desde Excel, o el
+// "Copy" de una sola tabla) todo va a la sección actual. Si la página deja
+// de exponer esas funciones, no intercepta y queda el import original.
+// ─────────────────────────────────────────────────────────────────────────
+
+(function() {
+    'use strict';
+
+    const MAX_COLUMNS = 4; // mismo límite que el import nativo
+
+    async function readClipboardHtml() {
+        const clipboardItems = await navigator.clipboard.read();
+        for (const item of clipboardItems) {
+            if (item.types.includes('text/html')) {
+                return await (await item.getType('text/html')).text();
+            }
+        }
+        return null;
+    }
+
+    // [{title, tables: [table, ...]}] en orden. Una tabla sin título propio
+    // justo antes se suma al grupo anterior.
+    function groupTablesByTitle(root) {
+        const groups = [];
+        let pendingTitle = null;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+        let el;
+        while ((el = walker.nextNode())) {
+            if (el.tagName === 'TABLE') {
+                if (el.parentElement.closest('table')) continue; // tabla anidada
+                const last = groups[groups.length - 1];
+                if (pendingTitle === null && last) {
+                    last.tables.push(el);
+                } else if (last && pendingTitle === last.title) {
+                    last.tables.push(el);
+                } else {
+                    groups.push({ title: pendingTitle, tables: [el] });
+                }
+                pendingTitle = null;
+            } else if (/^(P|DIV|H[1-6])$/.test(el.tagName) && !el.closest('table') &&
+                       !el.querySelector('table, p, div')) {
+                const text = el.textContent.replace(/ /g, ' ').trim();
+                if (text) pendingTitle = text;
+            }
+        }
+        return groups;
+    }
+
+    function sectionParts(container) {
+        return {
+            container,
+            header: container.querySelector('.headersection'),
+            content: container.querySelector('.dynamic-content'),
+        };
+    }
+
+    // Nueva sección justo después de `after`, creada por el handler nativo
+    // del botón "+" para que quede idéntica a una hecha a mano.
+    function addSectionAfter(after) {
+        const plus = after.container.querySelector('.sumsection');
+        if (!plus) return null;
+        plus.click();
+        const created = after.container.nextElementSibling;
+        return created && created.classList.contains('containerinformation')
+            ? sectionParts(created) : null;
+    }
+
+    function setHeader(section, title) {
+        section.header.value = title;
+        section.header.dispatchEvent(new Event('input', { bubbles: true }));
+        section.header.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    async function importAllTables() {
+        let htmlText;
+        try {
+            htmlText = await readClipboardHtml();
+        } catch (err) {
+            alert('Failed to read clipboard contents: ' + err);
+            return;
+        }
+        if (htmlText === null) return; // sin HTML: el nativo tampoco hace nada
+
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = htmlText;
+        const groups = groupTablesByTitle(tempDiv)
+            .map(g => ({ title: g.title, data: g.tables.map(t => window.extractTableData(t)).filter(d => d.length) }))
+            .filter(g => g.data.length);
+        if (!groups.length) {
+            alert('No table found in clipboard!');
+            return;
+        }
+
+        // Validar todo antes de crear nada: no dejar el import a medias.
+        const all = groups.flatMap(g => g.data);
+        const tooWide = all.findIndex(d => (d[0]?.length || 0) > MAX_COLUMNS);
+        if (tooWide >= 0) {
+            alert(`⚠️ Table ${tooWide + 1} of ${all.length} has more than ${MAX_COLUMNS} columns — nothing was imported.`);
+            return;
+        }
+
+        const start = window.lastSection && window.lastSection.closest
+            ? window.lastSection.closest('.containerinformation') : null;
+        if (!start) {
+            alert('Table creation section not found!');
+            return;
+        }
+
+        let section = sectionParts(start);
+        for (let i = 0; i < groups.length; i++) {
+            const group = groups[i];
+            if (group.title) {
+                const current = section.header.value.trim();
+                const reuse = i === 0 && (current === '' || current === group.title);
+                if (!reuse) {
+                    const next = addSectionAfter(section);
+                    if (!next) {
+                        alert('Could not create a new section — import stopped.');
+                        return;
+                    }
+                    section = next;
+                }
+                if (section.header.value.trim() !== group.title) setHeader(section, group.title);
+            }
+            window.lastSection = section.header;
+            window.lastDynamicContent = section.content;
+            group.data.forEach(data => window.createTableFromClipboard(data));
+        }
+
+        const modal = document.getElementById('disposeModal');
+        if (modal) modal.style.display = 'none';
+    }
+
+    window.addEventListener('click', function(e) {
+        if (!e.target.closest || !e.target.closest('#importTable')) return;
+        if (typeof window.extractTableData !== 'function' ||
+            typeof window.createTableFromClipboard !== 'function') return;
+
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        importAllTables();
+    }, true);
 
 })();
