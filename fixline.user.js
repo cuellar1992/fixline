@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.16
+// @version      4.17
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney + Import Table de varias tablas (una sección por título) + modo oscuro
 // @match        https://update.amspec.group/*
 // @grant        none
@@ -1032,6 +1032,16 @@
         .${KEEP_CLASS} [style*="background-image"] {
             filter: none;
         }
+        /* Íconos negros (disquete "Use document" flotante de selection.php) sobre
+           botón blanco: re-invertidos quedaban negro sobre negro. Sin re-invertir
+           el filtro global los aclara; el borde marca el botón, que si no se
+           pierde en el fondo y solo se ve la sombra. */
+        .copy_img_btn {
+            filter: brightness(0);
+        }
+        .floating-btn-tooltip > button {
+            box-shadow: inset 0 0 0 1px #999, 0 4px 8px rgba(0, 0, 0, 0.1) !important;
+        }
     `;
 
     function isBrandRed(el) {
@@ -1121,13 +1131,16 @@
 //   Desk History...) reciben la clase .active de la página, pero su estilo
 //   es idéntico al :hover y no se distingue cuál está seleccionada. La activa
 //   lleva borde blanco y negrita; las demás quedan atenuadas.
+// - Las filas de las listas de documentos tienen un hover visible y la fila
+//   seleccionada queda marcada; el foco con teclado se ve con un contorno.
 // ─────────────────────────────────────────────────────────────────────────
 
 (function() {
     'use strict';
 
     const STYLE_ID = 'amspec-button-feedback-style';
-    const BUTTONS = 'button, input[type="button"], input[type="submit"], input[type="reset"], [role="button"], .btn';
+    // #copy_btns > *: "Copy Document" / "Use Update" de history.php son <div>.
+    const BUTTONS = 'button, input[type="button"], input[type="submit"], input[type="reset"], [role="button"], .btn, #copy_btns > *';
 
     const CSS = `
         :where(${BUTTONS}) {
@@ -1152,6 +1165,33 @@
             opacity: 1;
             font-weight: 700;
             box-shadow: inset 0 0 0 2px #fff, 0 4px 10px rgba(0, 0, 0, 0.35);
+        }
+
+        /* Filas de las listas: el hover nativo (#fffdf5 / #f3f9ff) casi no
+           se distingue del fondo. La fila seleccionada (.active) conserva el
+           color de la página. */
+        .document-list .document-item:not(.active):hover,
+        .document-list .document-item:not(.active):focus-within {
+            background-color: #fbe3e3;
+            box-shadow: inset 4px 0 0 #91292a;
+        }
+        /* Fila seleccionada: el lavanda nativo, con el modo oscuro, queda casi
+           igual a las demás filas. */
+        .document-list .document-item.active {
+            box-shadow: inset 6px 0 0 #91292a, inset 0 0 0 2px #91292a;
+            font-weight: 600;
+        }
+
+        /* Foco con teclado (Tab): la página no muestra dónde está el foco. */
+        :where(${BUTTONS}):focus-visible {
+            outline: 2px solid #91292a;
+            outline-offset: 2px;
+        }
+        .document-list a.link-element:focus-visible {
+            outline: none;
+        }
+        .document-list a.link-element:focus-visible > .document-item {
+            box-shadow: inset 0 0 0 2px #91292a;
         }
     `;
 
