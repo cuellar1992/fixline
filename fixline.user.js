@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.15
+// @version      4.16
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney + Import Table de varias tablas (una sección por título) + modo oscuro
 // @match        https://update.amspec.group/*
 // @grant        none
@@ -1107,5 +1107,62 @@
     }
     // Popups, secciones nuevas, etc.: marcar sus elementos rojos al aparecer.
     new MutationObserver(scheduleMark).observe(document.documentElement, { childList: true, subtree: true });
+
+})();
+
+// ─────────────────────────────────────────────────────────────────────────
+// SECTION 8: FEEDBACK VISUAL DE BOTONES Y PESTAÑA ACTIVA
+// - Al presionar cualquier botón se encoge un poco (scale 0.97, estilo Emil
+//   Kowalski) para que se note el clic. Se usa la propiedad `scale` y no
+//   `transform` para no pisar el translateY del hover de la página. Las
+//   reglas van en :where() (especificidad 0): si la página ya define una
+//   transition para el botón, manda la suya.
+// - Las pestañas de selection.php (Desk Drafts, Personal Drafts, Templates,
+//   Desk History...) reciben la clase .active de la página, pero su estilo
+//   es idéntico al :hover y no se distingue cuál está seleccionada. La activa
+//   lleva borde blanco y negrita; las demás quedan atenuadas.
+// ─────────────────────────────────────────────────────────────────────────
+
+(function() {
+    'use strict';
+
+    const STYLE_ID = 'amspec-button-feedback-style';
+    const BUTTONS = 'button, input[type="button"], input[type="submit"], input[type="reset"], [role="button"], .btn';
+
+    const CSS = `
+        :where(${BUTTONS}) {
+            transition: scale 160ms cubic-bezier(0.23, 1, 0.32, 1);
+        }
+        :where(${BUTTONS}):active:not(:disabled) {
+            scale: 0.97;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            :where(${BUTTONS}):active:not(:disabled) {
+                scale: 1;
+            }
+        }
+
+        #group-titles > .hover-effect:not(.active) {
+            opacity: 0.65;
+        }
+        #group-titles > .hover-effect:not(.active):hover {
+            opacity: 1;
+        }
+        #group-titles > .hover-effect.active {
+            opacity: 1;
+            font-weight: 700;
+            box-shadow: inset 0 0 0 2px #fff, 0 4px 10px rgba(0, 0, 0, 0.35);
+        }
+    `;
+
+    function addStyle() {
+        if (document.getElementById(STYLE_ID)) return;
+        const style = document.createElement('style');
+        style.id = STYLE_ID;
+        style.textContent = CSS;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    addStyle();
 
 })();
