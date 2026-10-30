@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.17
+// @version      4.18
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney + Import Table de varias tablas (una sección por título) + modo oscuro
 // @match        https://update.amspec.group/*
 // @grant        none
@@ -419,13 +419,41 @@
 
     // ─────────────────────────────────────────────────────────────────────────
     // SECCIÓN 4: CONVERSIÓN DE ZONA HORARIA - "SENT AT"
-    // Convierte timestamps UTC+8 → hora local Sydney (+8h)
-    // Agrega la fecha del documento en segunda línea
+    // El servidor muestra la hora en horario de Europa central (CET/CEST).
+    // Antes se sumaba +8h fijo, que solo vale con CEST (UTC+2) y AEST (UTC+10):
+    // ambos lados tienen horario de verano en fechas distintas, así que la
+    // diferencia real va de +8h a +10h. Se convierte con Intl usando las zonas
+    // IANA, que aplican el DST de cada lado según la fecha del documento.
+    // Agrega la fecha (en Sydney) en segunda línea
     //
     // Formato resultado:
     //   Sydney NSW OPS - Sent at: 12:17 PM
     //   25 Apr 2026
     // ─────────────────────────────────────────────────────────────────────────
+
+    const SERVER_TZ = 'Europe/Paris';
+    const LOCAL_TZ = 'Australia/Sydney';
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    // Desfase (ms) de `timeZone` respecto a UTC en el instante `ts`.
+    function tzOffset(ts, timeZone) {
+        const parts = {};
+        new Intl.DateTimeFormat('en-US', {
+            timeZone, hourCycle: 'h23',
+            year: 'numeric', month: 'numeric', day: 'numeric',
+            hour: 'numeric', minute: 'numeric',
+        }).formatToParts(new Date(ts)).forEach(p => { parts[p.type] = p.value; });
+        const asUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute);
+        return asUtc - Math.floor(ts / 60000) * 60000;
+    }
+
+    // Hora "de pared" en `timeZone` → instante UTC (ms). Segunda pasada para
+    // acertar el desfase cuando la hora cae cerca de un cambio de DST.
+    function zonedToUtc(year, month, day, hours, minutes, timeZone) {
+        const wall = Date.UTC(year, month, day, hours, minutes);
+        const utc = wall - tzOffset(wall, timeZone);
+        return wall - tzOffset(utc, timeZone);
+    }
 
     function convertTimestamps(root) {
         const scope = root || document;
@@ -440,7 +468,6 @@
             const match = text.match(/^Sydney NSW OPS - Sent at:\s*(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
             if (!match) return;
 
-            // Convertir hora de UTC+8 a Sydney (+8 horas)
             let hours = parseInt(match[1]);
             const minutes = parseInt(match[2]);
             const period = match[3].toUpperCase();
@@ -448,41 +475,32 @@
             if (period === 'AM' && hours === 12) hours = 0;
             if (period === 'PM' && hours !== 12) hours += 12;
 
-            hours += 8;
-            let dayOffset = 0;
-            if (hours >= 24) {
-                hours -= 24;
-                dayOffset = 1;
-            }
-
-            const newPeriod = hours >= 12 ? 'PM' : 'AM';
-            let newHours = hours % 12;
-            if (newHours === 0) newHours = 12;
-            const convertedTime = `${newHours}:${minutes.toString().padStart(2, '0')} ${newPeriod}`;
-
-            // Obtener fecha del elemento hermano (título del documento)
-            let dateStr = '';
+            // Fecha del servidor desde el elemento hermano (título del documento).
+            // Sin ella no se sabe qué DST aplica: usar la fecha de hoy en el servidor.
+            let serverDate = null;
             const parent = el.parentElement;
             if (parent) {
                 for (const sibling of parent.children) {
                     if (sibling === el) continue;
-                    const dm = sibling.textContent.match(/\d+ - (\d{1,2} \w{3} \d{4}):/);
-                    if (dm) {
-                        dateStr = dm[1];
+                    const dm = sibling.textContent.match(/\d+ - (\d{1,2}) (\w{3}) (\d{4}):/);
+                    if (dm && MONTHS.includes(dm[2])) {
+                        serverDate = { day: parseInt(dm[1]), month: MONTHS.indexOf(dm[2]), year: parseInt(dm[3]) };
                         break;
                     }
                 }
             }
-
-            // Ajustar fecha si la conversión cruzó medianoche
-            if (dateStr && dayOffset) {
-                const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-                const dm = dateStr.match(/(\d{1,2}) (\w{3}) (\d{4})/);
-                if (dm) {
-                    const d = new Date(parseInt(dm[3]), months.indexOf(dm[2]), parseInt(dm[1]) + 1);
-                    dateStr = `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
-                }
+            if (!serverDate) {
+                const now = new Date(Date.now() + tzOffset(Date.now(), SERVER_TZ));
+                serverDate = { day: now.getUTCDate(), month: now.getUTCMonth(), year: now.getUTCFullYear() };
             }
+
+            const instant = new Date(zonedToUtc(serverDate.year, serverDate.month, serverDate.day, hours, minutes, SERVER_TZ));
+            const convertedTime = new Intl.DateTimeFormat('en-US', {
+                timeZone: LOCAL_TZ, hour: 'numeric', minute: '2-digit', hour12: true,
+            }).format(instant);
+            const dateStr = new Intl.DateTimeFormat('en-GB', {
+                timeZone: LOCAL_TZ, day: 'numeric', month: 'short', year: 'numeric',
+            }).format(instant);
 
             el.dataset.tzConverted = 'true';
             el.innerHTML = `Sydney NSW OPS - Sent at: ${convertedTime}${dateStr ? '<br>' + dateStr : ''}`;
