@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.18
+// @version      4.19
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney + Import Table de varias tablas (una sección por título) + modo oscuro
 // @match        https://update.amspec.group/*
 // @grant        none
@@ -17,19 +17,63 @@
     // Elimina espacios/saltos de línea basura del servidor en divs editables
     // ─────────────────────────────────────────────────────────────────────────
 
-    function deepClean(node) {
-        const walkers = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null, false);
-        let textNode;
-        const nodesToRemove = [];
+    // Fuente por defecto del contenido según la propia página (normalizeStyles /
+    // spantextareas de edit.php).
+    const DEFAULT_FONT_FAMILY = 'Aptos, sans-serif';
+    const DEFAULT_FONT_SIZE = '11pt';
 
-        while (textNode = walkers.nextNode()) {
-            if (!textNode.nodeValue.trim() && textNode.nodeValue.length > 0) {
-                nodesToRemove.push(textNode);
-            } else {
-                textNode.nodeValue = textNode.nodeValue.replace(/^[\s\t\n]+/, "").replace(/[\s\t\n]+$/, "");
-            }
+    // Elementos que cortan la línea: el espacio pegado a ellos no se ve en HTML
+    // normal pero sí con white-space: pre-wrap.
+    const LINE_BREAKERS = /^(BR|DIV|P|TABLE|TBODY|THEAD|TFOOT|TR|TD|TH|UL|OL|LI|H[1-6]|BLOCKQUOTE|PRE)$/;
+
+    // true si `textNode` es lo primero (dir = 'previous') o lo último
+    // (dir = 'next') de su línea dentro de `root`: entre él y el borde de la
+    // línea solo hay texto en blanco o fronteras de elementos inline.
+    function atLineEdge(textNode, root, dir) {
+        const sibling = dir + 'Sibling';
+        let n = textNode;
+        while (n && n !== root) {
+            let s = n[sibling];
+            while (s && s.nodeType === Node.TEXT_NODE && !s.nodeValue.trim()) s = s[sibling];
+            if (s) return s.nodeType === Node.ELEMENT_NODE && LINE_BREAKERS.test(s.tagName);
+            n = n.parentNode;
+            if (n === root || (n && LINE_BREAKERS.test(n.tagName))) return true;
         }
-        nodesToRemove.forEach(n => n.parentNode && n.parentNode.removeChild(n));
+        return true;
+    }
+
+    // Quita el espacio basura que entrega el servidor (saltos de línea e
+    // indentación entre etiquetas), que con pre-wrap se vería. Solo recorta en
+    // los bordes de cada línea: el espacio entre palabras separadas por
+    // etiquetas inline (`Vessel <b>X</b> arrived`) es contenido y se conserva.
+    function deepClean(node) {
+        const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null, false);
+        const edits = [];
+        let textNode;
+        while ((textNode = walker.nextNode())) {
+            edits.push({
+                node: textNode,
+                start: atLineEdge(textNode, node, 'previous'),
+                end: atLineEdge(textNode, node, 'next'),
+            });
+        }
+        // Decidir todo antes de modificar: los vecinos en blanco cuentan como
+        // estaban en el original.
+        edits.forEach(({ node: t, start, end }) => {
+            // En los extremos del nodo, el blanco con salto/tab es indentación del
+            // servidor: reducirlo a un espacio. Los \n internos son saltos reales
+            // (normalizeBreaks los pasa a <br>) y se dejan.
+            let v = t.nodeValue
+                .replace(/^\s*[\r\n\t]\s*/, ' ')
+                .replace(/\s*[\r\n\t]\s*$/, ' ');
+            if (start) v = v.replace(/^\s+/, '');
+            if (end) v = v.replace(/\s+$/, '');
+            if (v === '' && t.nodeValue !== '') {
+                t.parentNode && t.parentNode.removeChild(t);
+            } else if (v !== t.nodeValue) {
+                t.nodeValue = v;
+            }
+        });
     }
 
     // Envuelve cada línea (texto separado por <br>) en un <div> de bloque.
@@ -93,6 +137,15 @@
             // texto). Si se aplica fuente blanca/clara, el caret se vuelve invisible
             // sobre el fondo blanco. Fijarlo independiente del color de texto.
             div.style.caretColor = "#333";
+            // La página da a todo el contenido Aptos 11pt: normalizeStyles() lo pone
+            // en cada elemento y spantextareas() envuelve en un <span> Aptos el texto
+            // que se escribe suelto en la raíz. El texto suelto (que llega del
+            // servidor así, o que queda dentro de nuestros <div> de línea, donde
+            // spantextareas ya no actúa) heredaba el Calibri del CSS del editor y se
+            // veía más chico. Igualar la fuente heredada al default de la página.
+            // Es solo el estilo del contenedor: preparetextarea envía innerHTML.
+            div.style.fontFamily = DEFAULT_FONT_FAMILY;
+            div.style.fontSize = DEFAULT_FONT_SIZE;
 
             // Devuelve el <div> de línea (hijo directo de `div`) que contiene `node`,
             // subiendo por los ancestros. Usado por el paste handler y por el guard
@@ -402,6 +455,19 @@
             });
             node.parentNode.replaceChild(fragment, node);
         });
+
+        // 3) El texto que quedó suelto en la raíz (al desenvolver las líneas) no
+        // tiene fuente propia: en el documento guardado se vería con otra fuente
+        // que el resto. Envolverlo en el mismo <span> Aptos 11pt que crea la
+        // página (spantextareas) al escribir en la raíz.
+        Array.from(container.childNodes).forEach(node => {
+            if (node.nodeType !== Node.TEXT_NODE || !node.nodeValue.trim()) return;
+            const span = document.createElement('span');
+            span.style.fontFamily = DEFAULT_FONT_FAMILY;
+            span.style.fontSize = DEFAULT_FONT_SIZE;
+            container.replaceChild(span, node);
+            span.appendChild(node);
+        });
     }
 
     function interceptPrepareTextarea() {
@@ -463,6 +529,10 @@
         elements.forEach(el => {
             if (el.dataset.tzConverted) return;
             if (el.children.length > 0) return;
+            // Dentro de un editor es contenido que se envía (p.ej. un update
+            // anterior citado): convertirlo lo reescribiría, sumando horas en
+            // cada reenvío.
+            if (el.closest('[contenteditable="true"]')) return;
 
             const text = el.textContent.trim();
             const match = text.match(/^Sydney NSW OPS - Sent at:\s*(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
@@ -1075,6 +1145,8 @@
         document.querySelectorAll('body *').forEach(el => {
             if (el.classList.contains(KEEP_CLASS) || el.id === BUTTON_ID) return;
             if (el.parentElement && el.parentElement.closest('.' + KEEP_CLASS)) return;
+            // La clase quedaría guardada en el HTML del documento.
+            if (el.closest('[contenteditable="true"]')) return;
             if (isBrandRed(el)) el.classList.add(KEEP_CLASS);
         });
     }
