@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.19
-// @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney + Import Table de varias tablas (una sección por título) + modo oscuro
+// @version      4.20
+// @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney + Import Table de varias tablas (una sección por título) + Import Update (Operation Details/Timings) + modo oscuro
 // @match        https://update.amspec.group/*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/cuellar1992/fixline/main/fixline.user.js
@@ -922,7 +922,7 @@
 })();
 
 // ─────────────────────────────────────────────────────────────────────────
-// SECTION 6: IMPORT TABLE — VARIAS TABLAS, UNA SECCIÓN POR TÍTULO
+// SECTION 6: IMPORT TABLE — VARIAS TABLAS, UNA SECCIÓN POR TÍTULO (+ IMPORT UPDATE, al final)
 // El "Import Table" nativo (modal de "Add Table") solo toma la PRIMERA
 // <table> del portapapeles (tempDiv.querySelector('table')). Este handler
 // corre antes que el nativo (click en fase capture sobre window) e importa
@@ -1079,6 +1079,144 @@
         e.stopImmediatePropagation();
         importAllTables();
     }, true);
+
+    // ─────────────────────────────────────────────────────────────────────
+    // IMPORT UPDATE — Operation Details + Timings, una sección cada uno
+    // "Copy for Update" de Cargo Report Automation (Reports, Arrival/
+    // Departure) copia un bloque <div data-update-section="Título"> por
+    // sección, con un <div> por línea y los títulos de párrafo en <b>.
+    // El botón "Import Update" (junto a Add Textarea/Add Table de cada
+    // sección) los vuelca en orden: el primero va a la sección del botón si
+    // su encabezado está vacío o ya es ese título; si no, y para los
+    // siguientes, se crea una sección nueva con el "+" nativo. El editor se
+    // crea con el "Add Textarea" nativo (o se reusa uno vacío) y se arma
+    // desde el texto, sin pegar HTML del portapapeles tal cual. La página
+    // copia el editor a su input oculto al guardar (preparetextarea), así
+    // que no hace falta nada más. El saludo (#descriptioncontent) y los
+    // campos del encabezado no se tocan.
+    // ─────────────────────────────────────────────────────────────────────
+
+    const UPDATE_BTN_CLASS = 'amspec-import-update';
+
+    // [{title, lines: [{text, bold}]}]; línea en blanco = text ''.
+    function readUpdateBlocks(root) {
+        return [...root.querySelectorAll('[data-update-section]')].map(block => ({
+            title: block.getAttribute('data-update-section').trim(),
+            lines: [...block.children].map(div => ({
+                text: div.textContent.replace(/ /g, ' '),
+                bold: !!div.querySelector('b, strong'),
+            })),
+        })).filter(b => b.title && b.lines.length);
+    }
+
+    function fillEditor(editor, lines) {
+        editor.replaceChildren(...lines.map(({ text, bold }) => {
+            const div = document.createElement('div');
+            if (!text.trim()) {
+                div.appendChild(document.createElement('br'));
+            } else if (bold) {
+                const b = document.createElement('b');
+                b.textContent = text;
+                div.appendChild(b);
+            } else {
+                div.textContent = text;
+            }
+            return div;
+        }));
+    }
+
+    // Editor vacío de la sección o uno nuevo vía "Add Textarea".
+    function editorFor(section) {
+        const editors = section.content.querySelectorAll('.textareafalse');
+        const last = editors[editors.length - 1];
+        if (last && !last.textContent.trim()) return last;
+        const add = section.container.querySelector('.add-textarea-btn');
+        if (!add) return null;
+        add.click();
+        const created = section.content.querySelectorAll('.textareafalse');
+        return created.length > editors.length ? created[created.length - 1] : null;
+    }
+
+    async function importUpdate(button) {
+        let htmlText;
+        try {
+            htmlText = await readClipboardHtml();
+        } catch (err) {
+            alert('Failed to read clipboard contents: ' + err);
+            return;
+        }
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = htmlText || '';
+        const blocks = readUpdateBlocks(tempDiv);
+        if (!blocks.length) {
+            alert('No Operation Details / Timings in clipboard — use "Copy for Update" in Cargo Report Automation first.');
+            return;
+        }
+
+        const start = button.closest('.containerinformation');
+        if (!start) return;
+        let section = sectionParts(start);
+        for (let i = 0; i < blocks.length; i++) {
+            const block = blocks[i];
+            const current = section.header.value.trim();
+            const reuse = i === 0 && (current === '' || current === block.title);
+            if (!reuse) {
+                const next = addSectionAfter(section);
+                if (!next) {
+                    alert('Could not create a new section — import stopped.');
+                    return;
+                }
+                section = next;
+            }
+            if (section.header.value.trim() !== block.title) setHeader(section, block.title);
+            const editor = editorFor(section);
+            if (!editor) {
+                alert(`Could not add a textarea to "${block.title}" — import stopped.`);
+                return;
+            }
+            fillEditor(editor, block.lines);
+        }
+    }
+
+    // Un botón por sección; las secciones creadas con "+" llegan después,
+    // por eso el observer.
+    function addUpdateButtons() {
+        document.querySelectorAll('.containerinformation .button-group').forEach(group => {
+            if (group.querySelector('.' + UPDATE_BTN_CLASS)) return;
+            if (!group.querySelector('.add-textarea-btn')) return;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'buttonform amspec-keep-color ' + UPDATE_BTN_CLASS;
+            btn.textContent = 'Import Update';
+            btn.title = 'Operation Details + Timings from "Copy for Update" (Cargo Report Automation)';
+            group.appendChild(btn);
+        });
+    }
+
+    window.addEventListener('click', function(e) {
+        const btn = e.target.closest && e.target.closest('.' + UPDATE_BTN_CLASS);
+        if (!btn) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        importUpdate(btn);
+    }, true);
+
+    function setupUpdateButtons() {
+        if (!window.location.pathname.includes('edit.php')) return;
+        addUpdateButtons();
+        let pending = false;
+        new MutationObserver(() => {
+            if (pending) return;
+            pending = true;
+            requestAnimationFrame(() => { pending = false; addUpdateButtons(); });
+        }).observe(document.body, { childList: true, subtree: true });
+    }
+
+    if (document.readyState === 'loading') {
+        window.addEventListener('load', setupUpdateButtons);
+    } else {
+        setupUpdateButtons();
+    }
 
 })();
 
