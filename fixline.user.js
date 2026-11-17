@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Line Breaks - AMSPEC
 // @namespace    http://tampermonkey.net/
-// @version      4.20
+// @version      4.21
 // @description  Limpieza de nodos de texto basura + conversión de zona horaria a Sydney + Import Table de varias tablas (una sección por título) + Import Update (Operation Details/Timings) + modo oscuro
 // @match        https://update.amspec.group/*
 // @grant        none
@@ -704,7 +704,11 @@
                 if (value) emails[label] = value;
             });
 
-            if (!Object.keys(data).length && !emails.to && !emails.cc && !emails.bcc) return;
+            if (!Object.keys(data).length && !emails.to && !emails.cc && !emails.bcc) {
+                span.textContent = 'Nothing found';
+                setTimeout(() => { span.textContent = 'Copy Fields'; }, 2000);
+                return;
+            }
 
             const payload = { fields: data, emails };
             localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -716,15 +720,22 @@
         container.appendChild(div);
     }
 
-    function addPasteButton() {
+    // Read the payload at click time, never at page load: a page left open
+    // (another tab, back/forward cache) must paste the LATEST copied data.
+    function readPayload() {
         const stored = localStorage.getItem(STORAGE_KEY);
-        if (!stored) return;
+        if (!stored) return null;
+        try { return JSON.parse(stored); } catch { localStorage.removeItem(STORAGE_KEY); return null; }
+    }
+
+    function flash(el, text, original) {
+        el.textContent = text;
+        setTimeout(() => { el.textContent = original; }, 2000);
+    }
+
+    function addPasteButton() {
         const container = document.getElementById('buttonback');
         if (!container || document.getElementById('amspec-paste-fields')) return;
-
-        let payload;
-        try { payload = JSON.parse(stored); } catch { localStorage.removeItem(STORAGE_KEY); return; }
-        const data = payload.fields || payload; // backwards compat
 
         const btn = document.createElement('button');
         btn.id = 'amspec-paste-fields';
@@ -733,6 +744,10 @@
         btn.textContent = 'Paste Fields';
 
         btn.addEventListener('click', () => {
+            const payload = readPayload();
+            if (!payload) { flash(btn, 'Nothing copied', 'Paste Fields'); return; }
+            const data = payload.fields || payload; // backwards compat
+
             document.querySelectorAll('table tr').forEach(row => {
                 const select = row.querySelector('select');
                 const input = row.querySelector('input[type="text"], input:not([type="hidden"]):not([type="submit"])');
@@ -746,8 +761,7 @@
                 }
             });
 
-            btn.textContent = '✓ Pasted!';
-            setTimeout(() => { btn.textContent = 'Paste Fields'; }, 2000);
+            flash(btn, '✓ Pasted!', 'Paste Fields');
         });
 
         container.appendChild(btn);
@@ -788,14 +802,11 @@
     }
 
     function addPasteEmailsButton() {
-        const stored = localStorage.getItem(STORAGE_KEY);
-        if (!stored) return;
         if (document.getElementById('amspec-paste-emails')) return;
-
-        let payload;
-        try { payload = JSON.parse(stored); } catch { localStorage.removeItem(STORAGE_KEY); return; }
-        const emails = payload.emails;
-        if (!emails || (!emails.to && !emails.cc && !emails.bcc)) return;
+        // Insert inside #templates_buttons so it sits beside "Save as Template" in the same flex row
+        const container = document.getElementById('templates_buttons')
+            || document.querySelector('.bottom_panelback');
+        if (!container) return;
 
         // Mirror native CSS rules used by #copy_document_div and #saveActualTemplate
         const style = document.createElement('style');
@@ -837,17 +848,17 @@
         div.appendChild(h3);
 
         div.addEventListener('click', () => {
+            const emails = readPayload()?.emails;
+            if (!emails || (!emails.to && !emails.cc && !emails.bcc)) {
+                flash(h3, 'Nothing copied', 'Paste Emails');
+                return;
+            }
             injectEmailTags('to', emails.to);
             injectEmailTags('cc', emails.cc);
             injectEmailTags('bcc', emails.bcc);
-            h3.textContent = '✓ Pasted!';
-            setTimeout(() => { h3.textContent = 'Paste Emails'; }, 2000);
+            flash(h3, '✓ Pasted!', 'Paste Emails');
         });
 
-        // Insert inside #templates_buttons so it sits beside "Save as Template" in the same flex row
-        const container = document.getElementById('templates_buttons')
-            || document.querySelector('.bottom_panelback');
-        if (!container) return;
         container.appendChild(div);
     }
 
